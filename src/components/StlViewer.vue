@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
+import { STLExporter } from 'three/addons/exporters/STLExporter.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg'
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
@@ -992,6 +993,40 @@ const drillHoles = () => {
   }
 }
 
+// Download the current mesh as an STL file
+const downloadStl = () => {
+  if (!currentMesh) return
+
+  const exporter = new STLExporter()
+
+  // Create a temporary mesh without scale for export (apply scale to geometry instead)
+  const exportGeometry = currentMesh.geometry.clone()
+
+  // Apply the mesh scale to the geometry so the exported STL has correct dimensions
+  exportGeometry.scale(currentMesh.scale.x, currentMesh.scale.y, currentMesh.scale.z)
+
+  const exportMesh = new THREE.Mesh(exportGeometry)
+
+  // Export as binary STL (more compact)
+  const stlData = exporter.parse(exportMesh, { binary: true })
+
+  // Create blob and download
+  const blob = new Blob([stlData], { type: 'application/octet-stream' })
+  const url = URL.createObjectURL(blob)
+
+  const link = document.createElement('a')
+  link.href = url
+  // Use original filename with "-drilled" suffix, or default name
+  const baseName = fileName.value ? fileName.value.replace(/\.stl$/i, '') : 'model'
+  link.download = `${baseName}-drilled.stl`
+  link.click()
+
+  URL.revokeObjectURL(url)
+
+  // Clean up
+  exportGeometry.dispose()
+}
+
 // Analyze geometry to extract faces using connected components with shared edges
 const analyzeFaces = (geometry: THREE.BufferGeometry): Face[] => {
   const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute
@@ -1437,6 +1472,7 @@ onUnmounted(() => {
       <button @click="triggerFileInput" class="load-button">
         {{ fileName ? 'Load Different STL' : 'Load STL File' }}
       </button>
+      <button v-if="fileName" @click="downloadStl" class="download-button">Download STL</button>
       <span v-if="fileName" class="file-name">{{ fileName }}</span>
     </div>
 
@@ -1518,6 +1554,29 @@ onUnmounted(() => {
 }
 
 .load-button:active {
+  transform: translateY(0);
+}
+
+.download-button {
+  background: linear-gradient(135deg, #6b8dd6 0%, #4a6cb3 100%);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
+}
+
+.download-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(107, 141, 214, 0.4);
+}
+
+.download-button:active {
   transform: translateY(0);
 }
 
