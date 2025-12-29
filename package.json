@@ -18,9 +18,9 @@
   },
   "dependencies": {
     "@types/three": "^0.182.0",
+    "manifold-3d": "^3.3.2",
     "pinia": "^3.0.4",
     "three": "^0.182.0",
-    "three-bvh-csg": "^0.0.17",
     "vue": "^3.5.26",
     "vue-router": "^4.6.4"
   },

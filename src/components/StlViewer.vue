@@ -4,8 +4,23 @@ import * as THREE from 'three'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
 import { STLExporter } from 'three/addons/exporters/STLExporter.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg'
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
+import ManifoldModule from 'manifold-3d'
+import type { ManifoldToplevel, Manifold, Mesh as ManifoldMesh } from 'manifold-3d'
+// Import the WASM file URL for proper Vite handling
+import manifoldWasmUrl from 'manifold-3d/manifold.wasm?url'
+
+// Initialize Manifold WASM module
+let manifoldModule: ManifoldToplevel | null = null
+const initManifold = async () => {
+  if (!manifoldModule) {
+    manifoldModule = await ManifoldModule({
+      locateFile: () => manifoldWasmUrl,
+    })
+    manifoldModule.setup()
+  }
+  return manifoldModule
+}
 
 // A face is a group of triangles that share the same normal (within tolerance)
 interface Face {
@@ -794,13 +809,81 @@ const getPolygonBounds = (
   return { minX, maxX, minY, maxY }
 }
 
-// Drill 3x3 holes through the wall
-const drillHoles = () => {
+// Convert Three.js BufferGeometry to Manifold Mesh format
+const threeGeometryToManifoldMesh = (
+  geometry: THREE.BufferGeometry,
+  wasm: ManifoldToplevel,
+): ManifoldMesh => {
+  // Get indexed geometry - merge vertices first if non-indexed
+  let indexedGeometry = geometry
+  if (!geometry.index) {
+    indexedGeometry = mergeVertices(geometry, 1e-6)
+  }
+
+  const positionAttr = indexedGeometry.getAttribute('position') as THREE.BufferAttribute
+  const indexAttr = indexedGeometry.index!
+
+  const numVerts = positionAttr.count
+  const numTris = indexAttr.count / 3
+
+  // Create vertProperties array (3 floats per vertex: x, y, z)
+  const vertProperties = new Float32Array(numVerts * 3)
+  for (let i = 0; i < numVerts; i++) {
+    vertProperties[i * 3] = positionAttr.getX(i)
+    vertProperties[i * 3 + 1] = positionAttr.getY(i)
+    vertProperties[i * 3 + 2] = positionAttr.getZ(i)
+  }
+
+  // Create triVerts array (3 indices per triangle)
+  const triVerts = new Uint32Array(numTris * 3)
+  for (let i = 0; i < numTris * 3; i++) {
+    triVerts[i] = indexAttr.getX(i)
+  }
+
+  return new wasm.Mesh({
+    numProp: 3,
+    vertProperties,
+    triVerts,
+  })
+}
+
+// Convert Manifold Mesh back to Three.js BufferGeometry
+const manifoldMeshToThreeGeometry = (mesh: ManifoldMesh): THREE.BufferGeometry => {
+  const numTris = mesh.numTri
+
+  // Create position array from vertProperties
+  const positions = new Float32Array(numTris * 3 * 3) // 3 verts per tri, 3 floats per vert
+
+  // Convert indexed mesh to non-indexed for STL compatibility
+  for (let tri = 0; tri < numTris; tri++) {
+    const verts = mesh.verts(tri)
+    for (let v = 0; v < 3; v++) {
+      const vertIdx = verts[v]!
+      const pos = mesh.position(vertIdx)
+      const outIdx = (tri * 3 + v) * 3
+      positions[outIdx] = pos[0]!
+      positions[outIdx + 1] = pos[1]!
+      positions[outIdx + 2] = pos[2]!
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.computeVertexNormals()
+
+  return geometry
+}
+
+// Drill 3x3 holes through the wall using Manifold library (guaranteed manifold output)
+const drillHoles = async () => {
   if (!currentMesh || !currentWallData) return
 
   isDrilling.value = true
 
   try {
+    // Initialize Manifold WASM module
+    const wasm = await initManifold()
+
     const { intersection, planeOrigin, uAxis, vAxis, drillAxis, drillStart, drillEnd } =
       currentWallData
 
@@ -810,67 +893,48 @@ const drillHoles = () => {
     const height = bounds.maxY - bounds.minY
 
     // Calculate hole radius based on available space
-    // For a 3x3 grid with margin = padding = radius/2:
-    // width = margin + 3*diameter + 2*padding = r/2 + 3*2r + 2*r/2 = r/2 + 6r + r = 7.5r
-    // So radius = min(width, height) / 7.5
     const minDimension = Math.min(width, height)
     const radius = minDimension / 7.5
     const diameter = radius * 2
-    const spacing = diameter + radius / 2 // diameter + padding
+    const spacing = diameter + radius / 2
 
     // Center of the grid
     const centerX = (bounds.minX + bounds.maxX) / 2
     const centerY = (bounds.minY + bounds.maxY) / 2
 
-    // Wall thickness plus extra for clean cuts
+    // Wall thickness plus extra margin for clean cuts
     const wallThickness = Math.abs(drillEnd - drillStart)
-    const cylinderHeight = wallThickness * 2
+    const cylinderHeight = wallThickness * 3
 
-    // Create CSG evaluator - only use position and normal (STL doesn't have UV)
-    const evaluator = new Evaluator()
-    evaluator.attributes = ['position', 'normal']
-
-    // Prepare mesh geometry for CSG - needs to be indexed with only position and normal
+    // Convert Three.js geometry to Manifold format
     const meshGeometry = currentMesh.geometry.clone()
 
-    // Remove all attributes except position and normal
+    // Remove extra attributes
     const attributeNames = Object.keys(meshGeometry.attributes)
     for (const name of attributeNames) {
-      if (name !== 'position' && name !== 'normal') {
+      if (name !== 'position') {
         meshGeometry.deleteAttribute(name)
       }
     }
 
-    // Ensure we have normals
-    if (!meshGeometry.hasAttribute('normal')) {
-      meshGeometry.computeVertexNormals()
+    // Convert to Manifold mesh
+    const manifoldMesh = threeGeometryToManifoldMesh(meshGeometry, wasm)
+    let mainManifold: Manifold
+
+    try {
+      mainManifold = wasm.Manifold.ofMesh(manifoldMesh)
+    } catch {
+      // If mesh isn't manifold, try to repair it
+      console.warn('Input mesh not manifold, attempting repair...')
+      manifoldMesh.merge()
+      mainManifold = wasm.Manifold.ofMesh(manifoldMesh)
     }
 
-    // Merge vertices to create indexed geometry (STL is non-indexed)
-    const indexedGeometry = mergeVertices(meshGeometry)
+    // Set circular segments for smooth cylinders
+    wasm.setCircularSegments(32)
 
-    // Ensure geometry has an index (required for CSG)
-    if (!indexedGeometry.index) {
-      const positionAttr = indexedGeometry.getAttribute('position')
-      const indices: number[] = []
-      for (let i = 0; i < positionAttr.count; i++) {
-        indices.push(i)
-      }
-      indexedGeometry.setIndex(indices)
-    }
-
-    // Recompute normals after merging
-    indexedGeometry.computeVertexNormals()
-
-    // CSG requires geometry groups - add a single group covering all triangles
-    if (indexedGeometry.groups.length === 0) {
-      indexedGeometry.addGroup(0, indexedGeometry.index!.count, 0)
-    }
-
-    // Create all hole brushes first, then subtract them all
-    const holeBrushes: Brush[] = []
-
-    // Calculate hole positions (3x3 grid, centered)
+    // Create all cylinder holes and union them
+    const cylinders: Manifold[] = []
     const offsets = [-1, 0, 1]
 
     for (const row of offsets) {
@@ -883,69 +947,57 @@ const drillHoles = () => {
         holeCenter3D.add(uAxis.clone().multiplyScalar(holeX))
         holeCenter3D.add(vAxis.clone().multiplyScalar(holeY))
 
-        // Create cylinder geometry for the hole
-        const cylinderGeom = new THREE.CylinderGeometry(radius, radius, cylinderHeight, 32)
-
-        // Remove all attributes except position and normal to match main geometry
-        const cylAttrNames = Object.keys(cylinderGeom.attributes)
-        for (const name of cylAttrNames) {
-          if (name !== 'position' && name !== 'normal') {
-            cylinderGeom.deleteAttribute(name)
-          }
-        }
-
-        // Clear existing groups and add a single group
-        cylinderGeom.clearGroups()
-        cylinderGeom.addGroup(0, cylinderGeom.index!.count, 0)
-
-        // Orient cylinder along drill axis
-        // Default cylinder is along Y axis, need to rotate to align with drillAxis
-        const defaultAxis = new THREE.Vector3(0, 1, 0)
-        const quaternion = new THREE.Quaternion().setFromUnitVectors(defaultAxis, drillAxis)
-        cylinderGeom.applyQuaternion(quaternion)
-
-        // Position cylinder at hole center, centered on the wall
+        // Position along drill axis (center of wall)
         const wallCenter = (drillStart + drillEnd) / 2
-        const cylinderPosition = holeCenter3D
-          .clone()
-          .add(drillAxis.clone().multiplyScalar(wallCenter - holeCenter3D.dot(drillAxis)))
-        cylinderGeom.translate(cylinderPosition.x, cylinderPosition.y, cylinderPosition.z)
+        const alongAxis = wallCenter - holeCenter3D.dot(drillAxis)
+        const cylinderCenter = holeCenter3D.clone().add(drillAxis.clone().multiplyScalar(alongAxis))
 
-        const holeBrush = new Brush(cylinderGeom)
-        holeBrush.updateMatrixWorld()
-        holeBrushes.push(holeBrush)
+        // Create cylinder centered at origin along Z axis, then transform
+        let cylinder = wasm.Manifold.cylinder(cylinderHeight, radius, radius, 32, true)
+
+        // Manifold cylinder is along Z axis by default
+        // We need to rotate it to align with drillAxis
+        // Calculate rotation from Z axis to drillAxis
+        const zAxis = new THREE.Vector3(0, 0, 1)
+        const rotationQuat = new THREE.Quaternion().setFromUnitVectors(zAxis, drillAxis)
+        const euler = new THREE.Euler().setFromQuaternion(rotationQuat, 'XYZ')
+
+        // Apply rotation (Manifold uses degrees)
+        const degX = THREE.MathUtils.radToDeg(euler.x)
+        const degY = THREE.MathUtils.radToDeg(euler.y)
+        const degZ = THREE.MathUtils.radToDeg(euler.z)
+
+        cylinder = cylinder.rotate([degX, degY, degZ])
+        cylinder = cylinder.translate([cylinderCenter.x, cylinderCenter.y, cylinderCenter.z])
+
+        cylinders.push(cylinder)
       }
     }
 
-    // Create the main brush
-    const mainBrush = new Brush(indexedGeometry)
-    mainBrush.updateMatrixWorld()
+    // Union all cylinders into one
+    const combinedCylinders = wasm.Manifold.union(cylinders)
 
-    // Subtract first hole
-    const firstHole = holeBrushes[0]!
-    const resultBrush = evaluator.evaluate(mainBrush, firstHole, SUBTRACTION)
+    // Subtract from main mesh
+    const result = mainManifold.subtract(combinedCylinders)
 
-    // If first one works, do the rest
-    let currentResult = resultBrush
-    for (let i = 1; i < holeBrushes.length; i++) {
-      const holeBrush = holeBrushes[i]!
-      currentResult.updateMatrixWorld()
-      const newResult = evaluator.evaluate(currentResult, holeBrush, SUBTRACTION)
-      if (i > 1) {
-        currentResult.geometry.dispose()
-      }
-      currentResult = newResult
+    // Check for errors
+    const status = result.status()
+    if (status !== 'NoError') {
+      console.error('Manifold operation error, status:', status)
+      throw new Error(`Manifold CSG operation failed with status ${status}`)
     }
 
-    const finalBrush = currentResult
+    // Convert back to Three.js geometry
+    const resultMesh = result.getMesh()
+    const resultGeometry = manifoldMeshToThreeGeometry(resultMesh)
 
-    // Clean up hole brushes
-    for (const holeBrush of holeBrushes) {
-      holeBrush.geometry.dispose()
+    // Clean up Manifold objects (WASM memory management)
+    result.delete()
+    combinedCylinders.delete()
+    for (const cyl of cylinders) {
+      cyl.delete()
     }
-
-    // Get the result geometry
-    const resultGeometry = finalBrush.geometry
+    mainManifold.delete()
 
     // Remove old mesh
     scene.remove(currentMesh)
@@ -987,7 +1039,8 @@ const drillHoles = () => {
     clearOverlayMeshes()
   } catch (err) {
     console.error('Failed to drill holes:', err)
-    errorMessage.value = 'Failed to drill holes'
+    errorMessage.value =
+      'Failed to drill holes: ' + (err instanceof Error ? err.message : String(err))
   } finally {
     isDrilling.value = false
   }
@@ -1004,6 +1057,9 @@ const downloadStl = () => {
 
   // Apply the mesh scale to the geometry so the exported STL has correct dimensions
   exportGeometry.scale(currentMesh.scale.x, currentMesh.scale.y, currentMesh.scale.z)
+
+  // Ensure consistent normals
+  exportGeometry.computeVertexNormals()
 
   const exportMesh = new THREE.Mesh(exportGeometry)
 

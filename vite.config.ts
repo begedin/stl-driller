@@ -15,4 +15,9 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     },
   },
+  optimizeDeps: {
+    // Exclude manifold-3d from pre-bundling as it uses WASM
+    exclude: ['manifold-3d'],
+  },
+  assetsInclude: ['**/*.wasm'],
 })
