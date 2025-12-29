@@ -23,8 +23,8 @@ const selectedFaces = ref<number[]>([])
 const faces = ref<Face[]>([])
 const isDrilling = ref(false)
 
-// Can drill when exactly 2 faces are selected and wall is visible
-const canDrill = computed(() => selectedFaces.value.length === 2 && wallMesh !== null)
+// Can drill when exactly 2 faces are selected and wall data is computed
+const canDrill = computed(() => selectedFaces.value.length === 2 && currentWallData !== null)
 
 let scene: THREE.Scene
 let camera: THREE.PerspectiveCamera
@@ -41,12 +41,10 @@ let triangleToFaceMap: Map<number, number> = new Map()
 
 const BASE_COLOR = new THREE.Color(0x00d4aa)
 const HIGHLIGHT_COLOR = new THREE.Color(0xff6b6b)
-const WALL_COLOR = new THREE.Color(0x4488ff)
+const OVERLAP_COLOR = new THREE.Color(0x9966ff) // Purple for overlap highlight
+const DIM_SELECTED_COLOR = new THREE.Color(0x666699) // Dim color to show full selected faces
 
-// Wall overlay mesh
-let wallMesh: THREE.Mesh | null = null
-
-// Store wall parameters for drilling
+// Store wall parameters for drilling and visualization
 interface WallData {
   // 2D intersection polygon in local coordinates
   intersection: THREE.Vector2[]
@@ -59,8 +57,17 @@ interface WallData {
   // Start and end positions along drill axis
   drillStart: number
   drillEnd: number
+  // 3D vertices of intersection polygon on each face (for overlay visualization)
+  face1Vertices: THREE.Vector3[]
+  face2Vertices: THREE.Vector3[]
+  // Face normals (for positioning overlays)
+  face1Normal: THREE.Vector3
+  face2Normal: THREE.Vector3
 }
 let currentWallData: WallData | null = null
+
+// Overlay meshes showing the exact intersection on each face
+let overlayMeshes: THREE.Mesh[] = []
 
 // Create a canonical edge key from two vertex positions
 const makeEdgeKey = (v1: THREE.Vector3, v2: THREE.Vector3): string => {
@@ -90,28 +97,6 @@ const getVertex = (positionAttr: THREE.BufferAttribute, vertexIndex: number): TH
     positionAttr.getY(vertexIndex),
     positionAttr.getZ(vertexIndex),
   )
-}
-
-// Get all unique vertices of a face (deduplicated)
-const getFaceVertices = (face: Face, positionAttr: THREE.BufferAttribute): THREE.Vector3[] => {
-  const precision = 1e6
-  const round = (n: number) => Math.round(n * precision)
-  const seen = new Set<string>()
-  const vertices: THREE.Vector3[] = []
-
-  for (const triIndex of face.triangleIndices) {
-    const baseVertex = triIndex * 3
-    for (let v = 0; v < 3; v++) {
-      const vertex = getVertex(positionAttr, baseVertex + v)
-      const key = `${round(vertex.x)},${round(vertex.y)},${round(vertex.z)}`
-      if (!seen.has(key)) {
-        seen.add(key)
-        vertices.push(vertex)
-      }
-    }
-  }
-
-  return vertices
 }
 
 // Project a 3D point onto a plane, returning 2D coordinates in the plane's local frame
@@ -252,32 +237,200 @@ interface WallResult {
   wallData: WallData
 }
 
-// Create wall geometry from two selected faces
-const createWallGeometry = (
+// Check if two faces are coplanar (same plane, not just parallel)
+const areFacesCoplanar = (
   face1: Face,
   face2: Face,
   positionAttr: THREE.BufferAttribute,
+): boolean => {
+  const normalTolerance = 0.01
+  const distanceTolerance = 0.1
+
+  // Check if normals are the same or opposite (parallel planes)
+  const normalDot = face1.normal.dot(face2.normal)
+  const isParallel = Math.abs(Math.abs(normalDot) - 1) < normalTolerance
+
+  if (!isParallel) return false
+
+  // Check if on the same plane (same distance from origin)
+  const refNormal = face1.normal
+  const refDistance = getFacePlaneDistance(face1, positionAttr, refNormal)
+
+  const useNormal = normalDot < 0 ? refNormal.clone().negate() : refNormal
+  const faceDistance = getFacePlaneDistance(face2, positionAttr, useNormal)
+  const adjustedRefDistance = normalDot < 0 ? -refDistance : refDistance
+
+  return Math.abs(faceDistance - adjustedRefDistance) < distanceTolerance
+}
+
+// Check if two faces share an edge (have two vertices in common)
+const facesShareEdge = (face1: Face, face2: Face, positionAttr: THREE.BufferAttribute): boolean => {
+  const precision = 1e6
+  const round = (n: number) => Math.round(n * precision)
+
+  // Collect all vertex keys from face1
+  const face1Vertices = new Set<string>()
+  for (const triIndex of face1.triangleIndices) {
+    const baseVertex = triIndex * 3
+    for (let v = 0; v < 3; v++) {
+      const vertex = getVertex(positionAttr, baseVertex + v)
+      const key = `${round(vertex.x)},${round(vertex.y)},${round(vertex.z)}`
+      face1Vertices.add(key)
+    }
+  }
+
+  // Count how many vertices from face2 are shared with face1
+  let sharedCount = 0
+  const checked = new Set<string>()
+  for (const triIndex of face2.triangleIndices) {
+    const baseVertex = triIndex * 3
+    for (let v = 0; v < 3; v++) {
+      const vertex = getVertex(positionAttr, baseVertex + v)
+      const key = `${round(vertex.x)},${round(vertex.y)},${round(vertex.z)}`
+      if (!checked.has(key)) {
+        checked.add(key)
+        if (face1Vertices.has(key)) {
+          sharedCount++
+          if (sharedCount >= 2) return true // Two shared vertices = shared edge
+        }
+      }
+    }
+  }
+
+  return false
+}
+
+// Find all faces that are coplanar AND connected (share edges) with the given face
+// Uses flood-fill to only include directly connected coplanar faces
+const findConnectedCoplanarFaces = (
+  faceIndex: number,
+  allFaces: Face[],
+  positionAttr: THREE.BufferAttribute,
+): number[] => {
+  const referenceFace = allFaces[faceIndex]
+  if (!referenceFace) return [faceIndex]
+
+  const visited = new Set<number>()
+  const result: number[] = []
+  const queue: number[] = [faceIndex]
+
+  while (queue.length > 0) {
+    const currentIndex = queue.pop()!
+    if (visited.has(currentIndex)) continue
+    visited.add(currentIndex)
+
+    const currentFace = allFaces[currentIndex]
+    if (!currentFace) continue
+
+    // Check if coplanar with the reference face
+    if (currentIndex !== faceIndex && !areFacesCoplanar(referenceFace, currentFace, positionAttr)) {
+      continue
+    }
+
+    result.push(currentIndex)
+
+    // Find neighboring faces (share an edge) and add to queue
+    for (let i = 0; i < allFaces.length; i++) {
+      if (visited.has(i)) continue
+      const neighborFace = allFaces[i]!
+
+      if (facesShareEdge(currentFace, neighborFace, positionAttr)) {
+        queue.push(i)
+      }
+    }
+  }
+
+  return result.length > 0 ? result : [faceIndex]
+}
+
+// Get combined vertices from multiple faces
+const getCombinedFaceVertices = (
+  faceIndices: number[],
+  allFaces: Face[],
+  positionAttr: THREE.BufferAttribute,
+): THREE.Vector3[] => {
+  const precision = 1e6
+  const round = (n: number) => Math.round(n * precision)
+  const seen = new Set<string>()
+  const vertices: THREE.Vector3[] = []
+
+  for (const faceIndex of faceIndices) {
+    const face = allFaces[faceIndex]
+    if (!face) continue
+
+    for (const triIndex of face.triangleIndices) {
+      const baseVertex = triIndex * 3
+      for (let v = 0; v < 3; v++) {
+        const vertex = getVertex(positionAttr, baseVertex + v)
+        const key = `${round(vertex.x)},${round(vertex.y)},${round(vertex.z)}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          vertices.push(vertex)
+        }
+      }
+    }
+  }
+
+  return vertices
+}
+
+// Get combined center from multiple faces
+const getCombinedFaceCenter = (faceIndices: number[], allFaces: Face[]): THREE.Vector3 => {
+  const center = new THREE.Vector3()
+  let count = 0
+
+  for (const faceIndex of faceIndices) {
+    const face = allFaces[faceIndex]
+    if (!face) continue
+    center.add(face.center)
+    count++
+  }
+
+  if (count > 0) {
+    center.divideScalar(count)
+  }
+
+  return center
+}
+
+// Create wall geometry from two selected faces (considering all coplanar faces)
+const createWallGeometry = (
+  face1Indices: number[],
+  face2Indices: number[],
+  allFaces: Face[],
+  positionAttr: THREE.BufferAttribute,
 ): WallResult | null => {
   const normalTolerance = 0.01
+
+  // Use the first face of each group as reference for normals
+  const face1 = allFaces[face1Indices[0]!]
+  const face2 = allFaces[face2Indices[0]!]
+
+  if (!face1 || !face2) return null
 
   // Check if normals are the same (parallel planes) or opposite
   const normalDot = face1.normal.dot(face2.normal)
   const sameNormal = Math.abs(normalDot) > 1 - normalTolerance
 
   if (sameNormal) {
-    return createSameNormalWall(face1, face2, positionAttr, normalDot)
+    return createSameNormalWall(face1Indices, face2Indices, allFaces, positionAttr, normalDot)
   } else {
-    return createDifferentNormalWall(face1, face2, positionAttr)
+    return createDifferentNormalWall(face1Indices, face2Indices, allFaces, positionAttr)
   }
 }
 
 // Create wall for faces with same/opposite normals (cuboid)
 const createSameNormalWall = (
-  face1: Face,
-  face2: Face,
+  face1Indices: number[],
+  face2Indices: number[],
+  allFaces: Face[],
   positionAttr: THREE.BufferAttribute,
   normalDot: number,
 ): WallResult | null => {
+  // Use the first face of each group as reference for normals
+  const face1 = allFaces[face1Indices[0]!]!
+  const face2 = allFaces[face2Indices[0]!]!
+
   // Use face1's normal as reference (flip face2's if opposite)
   const normal = face1.normal.clone()
   const face2Normal = normalDot < 0 ? face2.normal.clone().negate() : face2.normal.clone()
@@ -286,14 +439,16 @@ const createSameNormalWall = (
   const avgNormal = normal.clone().add(face2Normal).normalize()
   const { u, v } = createPlaneBasis(avgNormal)
 
-  // Get face vertices
-  const vertices1 = getFaceVertices(face1, positionAttr)
-  const vertices2 = getFaceVertices(face2, positionAttr)
+  // Get combined vertices from all coplanar faces
+  const vertices1 = getCombinedFaceVertices(face1Indices, allFaces, positionAttr)
+  const vertices2 = getCombinedFaceVertices(face2Indices, allFaces, positionAttr)
 
   if (vertices1.length < 3 || vertices2.length < 3) return null
 
-  // Use midpoint between face centers as plane origin
-  const planeOrigin = face1.center.clone().add(face2.center).multiplyScalar(0.5)
+  // Use midpoint between combined face centers as plane origin
+  const center1 = getCombinedFaceCenter(face1Indices, allFaces)
+  const center2 = getCombinedFaceCenter(face2Indices, allFaces)
+  const planeOrigin = center1.clone().add(center2).multiplyScalar(0.5)
 
   // Project vertices to 2D
   const projected1 = vertices1.map((v3) => projectToPlane(v3, planeOrigin, avgNormal, u, v))
@@ -349,6 +504,10 @@ const createSameNormalWall = (
     drillAxis: avgNormal,
     drillStart: frontDist,
     drillEnd: backDist,
+    face1Vertices: d1 <= d2 ? frontVertices : backVertices,
+    face2Vertices: d1 <= d2 ? backVertices : frontVertices,
+    face1Normal: face1.normal.clone(),
+    face2Normal: face2.normal.clone(),
   }
 
   return { geometry, wallData }
@@ -356,10 +515,15 @@ const createSameNormalWall = (
 
 // Create wall for faces with different normals (middle plane projection)
 const createDifferentNormalWall = (
-  face1: Face,
-  face2: Face,
+  face1Indices: number[],
+  face2Indices: number[],
+  allFaces: Face[],
   positionAttr: THREE.BufferAttribute,
 ): WallResult | null => {
+  // Use the first face of each group as reference for normals
+  const face1 = allFaces[face1Indices[0]!]!
+  const face2 = allFaces[face2Indices[0]!]!
+
   // Find the bisector plane - the plane that has equal angles to both face normals
   // The bisector normal is the normalized sum of the two normals
   const bisectorNormal = face1.normal.clone().add(face2.normal).normalize()
@@ -379,12 +543,14 @@ const createDifferentNormalWall = (
 
   const { u, v } = createPlaneBasis(bisectorNormal)
 
-  // Use midpoint between face centers as plane origin
-  const planeOrigin = face1.center.clone().add(face2.center).multiplyScalar(0.5)
+  // Use midpoint between combined face centers as plane origin
+  const center1 = getCombinedFaceCenter(face1Indices, allFaces)
+  const center2 = getCombinedFaceCenter(face2Indices, allFaces)
+  const planeOrigin = center1.clone().add(center2).multiplyScalar(0.5)
 
-  // Get face vertices
-  const vertices1 = getFaceVertices(face1, positionAttr)
-  const vertices2 = getFaceVertices(face2, positionAttr)
+  // Get combined vertices from all coplanar faces
+  const vertices1 = getCombinedFaceVertices(face1Indices, allFaces, positionAttr)
+  const vertices2 = getCombinedFaceVertices(face2Indices, allFaces, positionAttr)
 
   if (vertices1.length < 3 || vertices2.length < 3) return null
 
@@ -445,9 +611,37 @@ const createDifferentNormalWall = (
     drillAxis: bisectorNormal,
     drillStart: Math.min(drillDist1, drillDist2),
     drillEnd: Math.max(drillDist1, drillDist2),
+    face1Vertices: vertices1_3d,
+    face2Vertices: vertices2_3d,
+    face1Normal: face1.normal.clone(),
+    face2Normal: face2.normal.clone(),
   }
 
   return { geometry, wallData }
+}
+
+// Create flat polygon geometry from vertices (for overlay visualization)
+const createFlatPolygonGeometry = (vertices: THREE.Vector3[]): THREE.BufferGeometry => {
+  const positions: number[] = []
+  const indices: number[] = []
+  const n = vertices.length
+
+  // Add vertices
+  for (const v of vertices) {
+    positions.push(v.x, v.y, v.z)
+  }
+
+  // Triangulate using fan from vertex 0
+  for (let i = 1; i < n - 1; i++) {
+    indices.push(0, i, i + 1)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.setIndex(indices)
+  geometry.computeVertexNormals()
+
+  return geometry
 }
 
 // Create geometry for an extruded polygon (connects two polygon faces)
@@ -499,51 +693,85 @@ const createExtrudedPolygonGeometry = (
   return geometry
 }
 
-// Update wall visualization based on selected faces
-const updateWallVisualization = () => {
-  // Remove existing wall mesh
-  if (wallMesh) {
-    scene.remove(wallMesh)
-    wallMesh.geometry.dispose()
-    if (wallMesh.material instanceof THREE.Material) {
-      wallMesh.material.dispose()
+// Clean up overlay meshes
+const clearOverlayMeshes = () => {
+  for (const mesh of overlayMeshes) {
+    scene.remove(mesh)
+    mesh.geometry.dispose()
+    if (mesh.material instanceof THREE.Material) {
+      mesh.material.dispose()
     }
-    wallMesh = null
   }
+  overlayMeshes = []
+}
 
-  // Clear wall data
+// Create overlay mesh for a face showing the intersection region
+const createOverlayMesh = (
+  vertices: THREE.Vector3[],
+  faceNormal: THREE.Vector3,
+  scale: THREE.Vector3,
+): THREE.Mesh => {
+  const geometry = createFlatPolygonGeometry(vertices)
+
+  const material = new THREE.MeshBasicMaterial({
+    color: OVERLAP_COLOR,
+    transparent: true,
+    opacity: 0.7,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  })
+
+  const mesh = new THREE.Mesh(geometry, material)
+
+  // Apply the same scale as the main mesh
+  mesh.scale.copy(scale)
+
+  return mesh
+}
+
+// Compute wall data based on selected faces (for drilling and overlap detection)
+const computeWallData = () => {
+  // Clear previous data and overlays
+  clearOverlayMeshes()
   currentWallData = null
 
-  // Only show wall when exactly 2 faces are selected
+  // Only compute when exactly 2 faces are selected
   if (selectedFaces.value.length !== 2 || !currentMesh) return
 
-  const face1 = faces.value[selectedFaces.value[0]!]
-  const face2 = faces.value[selectedFaces.value[1]!]
+  const selectedFace1 = selectedFaces.value[0]!
+  const selectedFace2 = selectedFaces.value[1]!
 
-  if (!face1 || !face2) return
+  if (!faces.value[selectedFace1] || !faces.value[selectedFace2]) return
 
   const positionAttr = currentMesh.geometry.getAttribute('position') as THREE.BufferAttribute
-  const wallResult = createWallGeometry(face1, face2, positionAttr)
+
+  // Face 1 (first selected): use exactly the selected face - this determines the drill area
+  // Face 2 (second selected): find connected coplanar faces - this is the "wall" which may have been
+  // split by previous drilling operations (only faces sharing edges are included)
+  const face1Indices = [selectedFace1]
+  const coplanarFaces2 = findConnectedCoplanarFaces(selectedFace2, faces.value, positionAttr)
+
+  const wallResult = createWallGeometry(face1Indices, coplanarFaces2, faces.value, positionAttr)
 
   if (!wallResult) return
 
   // Store wall data for drilling
   currentWallData = wallResult.wallData
 
-  const wallMaterial = new THREE.MeshPhongMaterial({
-    color: WALL_COLOR,
-    transparent: true,
-    opacity: 0.6,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  })
+  // Create overlay meshes for each face
+  const { face1Vertices, face2Vertices, face1Normal, face2Normal } = currentWallData
 
-  wallMesh = new THREE.Mesh(wallResult.geometry, wallMaterial)
+  const overlay1 = createOverlayMesh(face1Vertices, face1Normal, currentMesh.scale)
+  const overlay2 = createOverlayMesh(face2Vertices, face2Normal, currentMesh.scale)
 
-  // Apply the same scale transform as the main mesh
-  wallMesh.scale.copy(currentMesh.scale)
+  scene.add(overlay1)
+  scene.add(overlay2)
 
-  scene.add(wallMesh)
+  overlayMeshes.push(overlay1, overlay2)
 }
 
 // Calculate 2D bounding box of a polygon
@@ -752,9 +980,10 @@ const drillHoles = () => {
     currentMesh = newMesh
     scene.add(currentMesh)
 
-    // Clear selection and wall
+    // Clear selection, wall data, and overlays
     selectedFaces.value = []
-    updateWallVisualization()
+    currentWallData = null
+    clearOverlayMeshes()
   } catch (err) {
     console.error('Failed to drill holes:', err)
     errorMessage.value = 'Failed to drill holes'
@@ -881,12 +1110,16 @@ const initVertexColors = (geometry: THREE.BufferGeometry) => {
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
 }
 
-// Highlight the selected faces
+// Highlight the selected faces and create overlay meshes for the overlap
 const highlightSelectedFaces = () => {
+  // Compute wall data and create overlay meshes (for 2 faces)
+  computeWallData()
+
   if (!currentMesh) return
 
   const geometry = currentMesh.geometry
   const colorAttr = geometry.getAttribute('color')
+  const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute
   if (!colorAttr) return
 
   // Reset all colors to base
@@ -894,23 +1127,34 @@ const highlightSelectedFaces = () => {
     colorAttr.setXYZ(i, BASE_COLOR.r, BASE_COLOR.g, BASE_COLOR.b)
   }
 
-  // Apply highlight to selected faces
+  // Highlight selected faces
+  // Use dim color when 2 faces selected (overlays show the precise overlap)
+  // Use bright color when 1 face selected
+  const highlightColor = selectedFaces.value.length === 2 ? DIM_SELECTED_COLOR : HIGHLIGHT_COLOR
+
+  // For visual highlighting, include connected coplanar faces so the user can see the entire wall
+  // Only faces that share edges AND are on the same plane are included
+  const allFacesToHighlight = new Set<number>()
   for (const faceIndex of selectedFaces.value) {
+    const connectedCoplanarFaces = findConnectedCoplanarFaces(faceIndex, faces.value, positionAttr)
+    for (const idx of connectedCoplanarFaces) {
+      allFacesToHighlight.add(idx)
+    }
+  }
+
+  for (const faceIndex of allFacesToHighlight) {
     const face = faces.value[faceIndex]
     if (!face) continue
 
     for (const triangleIndex of face.triangleIndices) {
       const vertexStart = triangleIndex * 3
       for (let v = 0; v < 3; v++) {
-        colorAttr.setXYZ(vertexStart + v, HIGHLIGHT_COLOR.r, HIGHLIGHT_COLOR.g, HIGHLIGHT_COLOR.b)
+        colorAttr.setXYZ(vertexStart + v, highlightColor.r, highlightColor.g, highlightColor.b)
       }
     }
   }
 
   colorAttr.needsUpdate = true
-
-  // Update wall visualization whenever face selection changes
-  updateWallVisualization()
 }
 
 // Track mouse down position to distinguish clicks from drags
@@ -1053,16 +1297,8 @@ const loadStl = (file: File) => {
   faces.value = []
   selectedFaces.value = []
   triangleToFaceMap = new Map()
-
-  // Remove wall mesh if exists
-  if (wallMesh) {
-    scene.remove(wallMesh)
-    wallMesh.geometry.dispose()
-    if (wallMesh.material instanceof THREE.Material) {
-      wallMesh.material.dispose()
-    }
-    wallMesh = null
-  }
+  currentWallData = null
+  clearOverlayMeshes()
 
   const reader = new FileReader()
 
@@ -1183,13 +1419,7 @@ onUnmounted(() => {
     }
   }
 
-  if (wallMesh) {
-    wallMesh.geometry.dispose()
-    if (wallMesh.material instanceof THREE.Material) {
-      wallMesh.material.dispose()
-    }
-  }
-
+  clearOverlayMeshes()
   renderer?.dispose()
 })
 </script>
