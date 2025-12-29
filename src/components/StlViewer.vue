@@ -38,9 +38,85 @@ const errorMessage = ref<string | null>(null)
 const selectedFaces = ref<number[]>([])
 const faces = ref<Face[]>([])
 const isDrilling = ref(false)
+const holeDiameter = ref(5) // Diameter in mm
 
 // Can drill when exactly 2 faces are selected and wall data is computed
-const canDrill = computed(() => selectedFaces.value.length === 2 && currentWallData !== null)
+const canDrill = computed(() => selectedFaces.value.length === 2 && currentWallData.value !== null)
+
+// Calculate 2D bounding box of a polygon
+const getPolygonBounds = (
+  polygon: THREE.Vector2[],
+): { minX: number; maxX: number; minY: number; maxY: number } => {
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+
+  for (const p of polygon) {
+    minX = Math.min(minX, p.x)
+    maxX = Math.max(maxX, p.x)
+    minY = Math.min(minY, p.y)
+    maxY = Math.max(maxY, p.y)
+  }
+
+  return { minX, maxX, minY, maxY }
+}
+
+// Calculate the hole grid layout based on diameter and available space
+// Returns null if no holes can fit
+const calculateHoleGrid = (
+  bounds: { minX: number; maxX: number; minY: number; maxY: number },
+  diameter: number,
+): { positions: { x: number; y: number }[]; numX: number; numY: number } | null => {
+  const width = bounds.maxX - bounds.minX
+  const height = bounds.maxY - bounds.minY
+  const radius = diameter / 2
+
+  // Minimum gap between holes and from edges (at least 20% of diameter, minimum 0.5mm)
+  const minGap = Math.max(0.5, diameter * 0.2)
+
+  // Calculate how many holes fit in each direction
+  // Formula: N holes need N*D space for holes + (N+1)*gap for spacing
+  // So: N*D + (N+1)*gap <= dimension
+  // N*(D + gap) <= dimension - gap
+  // N <= (dimension - gap) / (D + gap)
+  const numX = Math.max(1, Math.floor((width - minGap) / (diameter + minGap)))
+  const numY = Math.max(1, Math.floor((height - minGap) / (diameter + minGap)))
+
+  // Check if at least one hole fits (need space for diameter + 2 * edge gap)
+  if (width < diameter + 2 * minGap || height < diameter + 2 * minGap) {
+    return null
+  }
+
+  // Calculate actual gaps to distribute evenly
+  // Total space used: numX * diameter + (numX + 1) * gapX = width
+  // gapX = (width - numX * diameter) / (numX + 1)
+  const gapX = (width - numX * diameter) / (numX + 1)
+  const gapY = (height - numY * diameter) / (numY + 1)
+
+  // Generate hole positions
+  // First hole center: bounds.min + gap + radius
+  // Subsequent holes: spaced by (diameter + gap)
+  const positions: { x: number; y: number }[] = []
+
+  for (let row = 0; row < numY; row++) {
+    for (let col = 0; col < numX; col++) {
+      const x = bounds.minX + gapX + radius + col * (diameter + gapX)
+      const y = bounds.minY + gapY + radius + row * (diameter + gapY)
+      positions.push({ x, y })
+    }
+  }
+
+  return { positions, numX, numY }
+}
+
+// Calculate expected hole grid for UI feedback
+const expectedHoleGrid = computed(() => {
+  if (!currentWallData.value) return null
+
+  const bounds = getPolygonBounds(currentWallData.value.intersection)
+  return calculateHoleGrid(bounds, holeDiameter.value)
+})
 
 let scene: THREE.Scene
 let camera: THREE.PerspectiveCamera
@@ -80,7 +156,7 @@ interface WallData {
   face1Normal: THREE.Vector3
   face2Normal: THREE.Vector3
 }
-let currentWallData: WallData | null = null
+const currentWallData = ref<WallData | null>(null)
 
 // Overlay meshes showing the exact intersection on each face
 let overlayMeshes: THREE.Mesh[] = []
@@ -753,7 +829,7 @@ const createOverlayMesh = (
 const computeWallData = () => {
   // Clear previous data and overlays
   clearOverlayMeshes()
-  currentWallData = null
+  currentWallData.value = null
 
   // Only compute when exactly 2 faces are selected
   if (selectedFaces.value.length !== 2 || !currentMesh) return
@@ -776,10 +852,10 @@ const computeWallData = () => {
   if (!wallResult) return
 
   // Store wall data for drilling
-  currentWallData = wallResult.wallData
+  currentWallData.value = wallResult.wallData
 
   // Create overlay meshes for each face
-  const { face1Vertices, face2Vertices, face1Normal, face2Normal } = currentWallData
+  const { face1Vertices, face2Vertices, face1Normal, face2Normal } = currentWallData.value
 
   const overlay1 = createOverlayMesh(face1Vertices, face1Normal, currentMesh.scale)
   const overlay2 = createOverlayMesh(face2Vertices, face2Normal, currentMesh.scale)
@@ -788,25 +864,6 @@ const computeWallData = () => {
   scene.add(overlay2)
 
   overlayMeshes.push(overlay1, overlay2)
-}
-
-// Calculate 2D bounding box of a polygon
-const getPolygonBounds = (
-  polygon: THREE.Vector2[],
-): { minX: number; maxX: number; minY: number; maxY: number } => {
-  let minX = Infinity
-  let maxX = -Infinity
-  let minY = Infinity
-  let maxY = -Infinity
-
-  for (const p of polygon) {
-    minX = Math.min(minX, p.x)
-    maxX = Math.max(maxX, p.x)
-    minY = Math.min(minY, p.y)
-    maxY = Math.max(maxY, p.y)
-  }
-
-  return { minX, maxX, minY, maxY }
 }
 
 // Convert Three.js BufferGeometry to Manifold Mesh format
@@ -874,9 +931,9 @@ const manifoldMeshToThreeGeometry = (mesh: ManifoldMesh): THREE.BufferGeometry =
   return geometry
 }
 
-// Drill 3x3 holes through the wall using Manifold library (guaranteed manifold output)
+// Drill holes through the wall using Manifold library (guaranteed manifold output)
 const drillHoles = async () => {
-  if (!currentMesh || !currentWallData) return
+  if (!currentMesh || !currentWallData.value) return
 
   isDrilling.value = true
 
@@ -885,22 +942,22 @@ const drillHoles = async () => {
     const wasm = await initManifold()
 
     const { intersection, planeOrigin, uAxis, vAxis, drillAxis, drillStart, drillEnd } =
-      currentWallData
+      currentWallData.value
 
     // Get bounds of the intersection polygon
     const bounds = getPolygonBounds(intersection)
-    const width = bounds.maxX - bounds.minX
-    const height = bounds.maxY - bounds.minY
 
-    // Calculate hole radius based on available space
-    const minDimension = Math.min(width, height)
-    const radius = minDimension / 7.5
-    const diameter = radius * 2
-    const spacing = diameter + radius / 2
+    // Use user-specified diameter
+    const diameter = holeDiameter.value
+    const radius = diameter / 2
 
-    // Center of the grid
-    const centerX = (bounds.minX + bounds.maxX) / 2
-    const centerY = (bounds.minY + bounds.maxY) / 2
+    // Calculate hole grid
+    const grid = calculateHoleGrid(bounds, diameter)
+    if (!grid || grid.positions.length === 0) {
+      errorMessage.value = `Holes of ${diameter}mm diameter don't fit in the selected area`
+      isDrilling.value = false
+      return
+    }
 
     // Wall thickness plus extra margin for clean cuts
     const wallThickness = Math.abs(drillEnd - drillStart)
@@ -935,43 +992,37 @@ const drillHoles = async () => {
 
     // Create all cylinder holes and union them
     const cylinders: Manifold[] = []
-    const offsets = [-1, 0, 1]
 
-    for (const row of offsets) {
-      for (const col of offsets) {
-        const holeX = centerX + col * spacing
-        const holeY = centerY + row * spacing
+    for (const pos of grid.positions) {
+      // Convert 2D position to 3D
+      const holeCenter3D = planeOrigin.clone()
+      holeCenter3D.add(uAxis.clone().multiplyScalar(pos.x))
+      holeCenter3D.add(vAxis.clone().multiplyScalar(pos.y))
 
-        // Convert 2D position to 3D
-        const holeCenter3D = planeOrigin.clone()
-        holeCenter3D.add(uAxis.clone().multiplyScalar(holeX))
-        holeCenter3D.add(vAxis.clone().multiplyScalar(holeY))
+      // Position along drill axis (center of wall)
+      const wallCenter = (drillStart + drillEnd) / 2
+      const alongAxis = wallCenter - holeCenter3D.dot(drillAxis)
+      const cylinderCenter = holeCenter3D.clone().add(drillAxis.clone().multiplyScalar(alongAxis))
 
-        // Position along drill axis (center of wall)
-        const wallCenter = (drillStart + drillEnd) / 2
-        const alongAxis = wallCenter - holeCenter3D.dot(drillAxis)
-        const cylinderCenter = holeCenter3D.clone().add(drillAxis.clone().multiplyScalar(alongAxis))
+      // Create cylinder centered at origin along Z axis, then transform
+      let cylinder = wasm.Manifold.cylinder(cylinderHeight, radius, radius, 32, true)
 
-        // Create cylinder centered at origin along Z axis, then transform
-        let cylinder = wasm.Manifold.cylinder(cylinderHeight, radius, radius, 32, true)
+      // Manifold cylinder is along Z axis by default
+      // We need to rotate it to align with drillAxis
+      // Calculate rotation from Z axis to drillAxis
+      const zAxis = new THREE.Vector3(0, 0, 1)
+      const rotationQuat = new THREE.Quaternion().setFromUnitVectors(zAxis, drillAxis)
+      const euler = new THREE.Euler().setFromQuaternion(rotationQuat, 'XYZ')
 
-        // Manifold cylinder is along Z axis by default
-        // We need to rotate it to align with drillAxis
-        // Calculate rotation from Z axis to drillAxis
-        const zAxis = new THREE.Vector3(0, 0, 1)
-        const rotationQuat = new THREE.Quaternion().setFromUnitVectors(zAxis, drillAxis)
-        const euler = new THREE.Euler().setFromQuaternion(rotationQuat, 'XYZ')
+      // Apply rotation (Manifold uses degrees)
+      const degX = THREE.MathUtils.radToDeg(euler.x)
+      const degY = THREE.MathUtils.radToDeg(euler.y)
+      const degZ = THREE.MathUtils.radToDeg(euler.z)
 
-        // Apply rotation (Manifold uses degrees)
-        const degX = THREE.MathUtils.radToDeg(euler.x)
-        const degY = THREE.MathUtils.radToDeg(euler.y)
-        const degZ = THREE.MathUtils.radToDeg(euler.z)
+      cylinder = cylinder.rotate([degX, degY, degZ])
+      cylinder = cylinder.translate([cylinderCenter.x, cylinderCenter.y, cylinderCenter.z])
 
-        cylinder = cylinder.rotate([degX, degY, degZ])
-        cylinder = cylinder.translate([cylinderCenter.x, cylinderCenter.y, cylinderCenter.z])
-
-        cylinders.push(cylinder)
-      }
+      cylinders.push(cylinder)
     }
 
     // Union all cylinders into one
@@ -1035,7 +1086,7 @@ const drillHoles = async () => {
 
     // Clear selection, wall data, and overlays
     selectedFaces.value = []
-    currentWallData = null
+    currentWallData.value = null
     clearOverlayMeshes()
   } catch (err) {
     console.error('Failed to drill holes:', err)
@@ -1388,7 +1439,7 @@ const loadStl = (file: File) => {
   faces.value = []
   selectedFaces.value = []
   triangleToFaceMap = new Map()
-  currentWallData = null
+  currentWallData.value = null
   clearOverlayMeshes()
 
   const reader = new FileReader()
@@ -1553,7 +1604,7 @@ onUnmounted(() => {
     <!-- Face info -->
     <div
       v-if="faces.length > 0"
-      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm"
+      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
     >
       <div class="flex items-center gap-2">
         <span class="text-gray-500">Faces:</span>
@@ -1571,13 +1622,41 @@ onUnmounted(() => {
       <div v-else class="text-gray-500 italic">
         Click to select a face, ⌘/Ctrl+click to select the second face
       </div>
+    </div>
+
+    <!-- Hole parameters (shown when 2 faces selected) -->
+    <div
+      v-if="selectedFaces.length === 2"
+      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
+    >
+      <div class="flex items-center gap-2">
+        <label for="holeDiameter" class="text-gray-500">Hole diameter:</label>
+        <input
+          id="holeDiameter"
+          v-model.number="holeDiameter"
+          type="number"
+          min="0.5"
+          step="0.5"
+          class="w-20 px-2 py-1 rounded bg-scene-bg border border-gray-600 text-white text-sm focus:outline-none focus:border-primary"
+        />
+        <span class="text-gray-500">mm</span>
+      </div>
+      <div v-if="expectedHoleGrid" class="flex items-center gap-2">
+        <span class="text-gray-500">Grid:</span>
+        <span class="text-accent font-semibold">
+          {{ expectedHoleGrid.numX }} × {{ expectedHoleGrid.numY }}
+          ({{ expectedHoleGrid.positions.length }} holes)
+        </span>
+      </div>
+      <div v-else class="text-warning italic">
+        Holes don't fit in selected area
+      </div>
       <button
-        v-if="selectedFaces.length === 2"
         @click="drillHoles"
-        :disabled="isDrilling || !canDrill"
+        :disabled="isDrilling || !canDrill || !expectedHoleGrid"
         class="bg-gradient-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
       >
-        {{ isDrilling ? 'Drilling...' : 'Drill 3×3 Holes' }}
+        {{ isDrilling ? 'Drilling...' : expectedHoleGrid ? `Drill ${expectedHoleGrid.numX}×${expectedHoleGrid.numY} Holes` : 'Drill Holes' }}
       </button>
     </div>
 
