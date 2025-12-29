@@ -1516,239 +1516,90 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="stl-viewer">
-    <div class="controls">
+  <div class="flex flex-col gap-4 w-full max-w-[800px]">
+    <!-- Controls -->
+    <div class="flex items-center gap-4 flex-wrap">
       <input
         ref="fileInputRef"
         type="file"
         accept=".stl"
         @change="handleFileSelect"
-        class="file-input"
+        class="hidden"
       />
-      <button @click="triggerFileInput" class="load-button">
+      <button
+        @click="triggerFileInput"
+        class="bg-gradient-to-br from-primary to-primary-dark text-scene-bg border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(0,212,170,0.4)] active:translate-y-0"
+      >
         {{ fileName ? 'Load Different STL' : 'Load STL File' }}
       </button>
-      <button v-if="fileName" @click="downloadStl" class="download-button">Download STL</button>
-      <span v-if="fileName" class="file-name">{{ fileName }}</span>
+      <button
+        v-if="fileName"
+        @click="downloadStl"
+        class="bg-gradient-to-br from-accent to-accent-dark text-white border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(107,141,214,0.4)] active:translate-y-0"
+      >
+        Download STL
+      </button>
+      <span v-if="fileName" class="text-gray-500 text-sm italic">{{ fileName }}</span>
     </div>
 
-    <div v-if="errorMessage" class="error">{{ errorMessage }}</div>
+    <!-- Error message -->
+    <div
+      v-if="errorMessage"
+      class="text-danger bg-danger/10 px-4 py-3 rounded-lg border border-danger/30"
+    >
+      {{ errorMessage }}
+    </div>
 
-    <div v-if="faces.length > 0" class="face-info">
-      <div class="face-count">
-        <span class="label">Faces:</span>
-        <span class="value">{{ faces.length }}</span>
+    <!-- Face info -->
+    <div
+      v-if="faces.length > 0"
+      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm"
+    >
+      <div class="flex items-center gap-2">
+        <span class="text-gray-500">Faces:</span>
+        <span class="text-primary font-semibold">{{ faces.length }}</span>
       </div>
-      <div v-if="selectedFaces.length > 0" class="selected-face">
-        <span class="label">Selected:</span>
-        <span class="value">
+      <div v-if="selectedFaces.length > 0" class="flex items-center gap-2">
+        <span class="text-gray-500">Selected:</span>
+        <span class="text-danger font-semibold">
           Face {{ selectedFaces[0]! + 1 }}
           <template v-if="selectedFaces.length === 2">
             &amp; Face {{ selectedFaces[1]! + 1 }}
           </template>
         </span>
       </div>
-      <div v-else class="selection-hint">
+      <div v-else class="text-gray-500 italic">
         Click to select a face, ⌘/Ctrl+click to select the second face
       </div>
       <button
         v-if="selectedFaces.length === 2"
         @click="drillHoles"
         :disabled="isDrilling || !canDrill"
-        class="drill-button"
+        class="bg-gradient-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
       >
         {{ isDrilling ? 'Drilling...' : 'Drill 3×3 Holes' }}
       </button>
     </div>
 
-    <div ref="containerRef" class="canvas-container" @drop="handleDrop" @dragover="handleDragOver">
-      <div v-if="isLoading" class="loading">Loading...</div>
-      <div v-if="!fileName && !isLoading" class="drop-hint">
+    <!-- Canvas container -->
+    <div
+      ref="containerRef"
+      @drop="handleDrop"
+      @dragover="handleDragOver"
+      class="w-full h-[500px] rounded-xl overflow-hidden relative bg-scene-bg border-2 border-dashed border-gray-700 transition-colors duration-200 hover:border-primary"
+    >
+      <div
+        v-if="isLoading"
+        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none"
+      >
+        Loading...
+      </div>
+      <div
+        v-if="!fileName && !isLoading"
+        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none max-w-[250px] leading-relaxed"
+      >
         Drop an STL file here or click the button above
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.stl-viewer {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  width: 100%;
-  max-width: 800px;
-}
-
-.controls {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-.file-input {
-  display: none;
-}
-
-.load-button {
-  background: linear-gradient(135deg, #00d4aa 0%, #00a88a 100%);
-  color: #1a1a2e;
-  border: none;
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    transform 0.2s,
-    box-shadow 0.2s;
-}
-
-.load-button:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 20px rgba(0, 212, 170, 0.4);
-}
-
-.load-button:active {
-  transform: translateY(0);
-}
-
-.download-button {
-  background: linear-gradient(135deg, #6b8dd6 0%, #4a6cb3 100%);
-  color: white;
-  border: none;
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    transform 0.2s,
-    box-shadow 0.2s;
-}
-
-.download-button:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 20px rgba(107, 141, 214, 0.4);
-}
-
-.download-button:active {
-  transform: translateY(0);
-}
-
-.file-name {
-  color: #888;
-  font-size: 0.9rem;
-  font-style: italic;
-}
-
-.error {
-  color: #ff6b6b;
-  background: rgba(255, 107, 107, 0.1);
-  padding: 0.75rem 1rem;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 107, 107, 0.3);
-}
-
-.canvas-container {
-  width: 100%;
-  height: 500px;
-  border-radius: 12px;
-  overflow: hidden;
-  position: relative;
-  background: #1a1a2e;
-  border: 2px dashed #333355;
-  transition: border-color 0.2s;
-}
-
-.canvas-container:hover {
-  border-color: #00d4aa;
-}
-
-.loading,
-.drop-hint {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  color: #666;
-  font-size: 1.1rem;
-  text-align: center;
-  pointer-events: none;
-}
-
-.drop-hint {
-  max-width: 250px;
-  line-height: 1.6;
-}
-
-.face-info {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  padding: 0.75rem 1rem;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  font-size: 0.9rem;
-}
-
-.face-count,
-.selected-face {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.face-info .label {
-  color: #888;
-}
-
-.face-info .value {
-  color: #00d4aa;
-  font-weight: 600;
-}
-
-.selected-face .value {
-  color: #ff6b6b;
-}
-
-.triangle-count {
-  color: #666;
-  font-size: 0.85rem;
-}
-
-.selection-hint {
-  color: #666;
-  font-style: italic;
-}
-
-.drill-button {
-  background: linear-gradient(135deg, #4488ff 0%, #2266dd 100%);
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    transform 0.2s,
-    box-shadow 0.2s,
-    opacity 0.2s;
-  margin-left: auto;
-}
-
-.drill-button:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(68, 136, 255, 0.4);
-}
-
-.drill-button:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.drill-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-</style>
