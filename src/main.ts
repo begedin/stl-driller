@@ -1,12 +1,9 @@
 import './assets/main.css'
 
 import { createApp } from 'vue'
-import { createPinia } from 'pinia'
 
-import App from './App.vue'
+import STLDriller from './STLDriller.vue'
 
-const app = createApp(App)
-
-app.use(createPinia())
+const app = createApp(STLDriller)
 
 app.mount('#app')

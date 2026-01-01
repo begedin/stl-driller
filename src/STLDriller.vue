@@ -1567,118 +1567,163 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 w-full max-w-[800px]">
-    <!-- Controls -->
-    <div class="flex items-center gap-4 flex-wrap">
-      <input
-        ref="fileInputRef"
-        type="file"
-        accept=".stl"
-        @change="handleFileSelect"
-        class="hidden"
-      />
-      <button
-        @click="triggerFileInput"
-        class="bg-gradient-to-br from-primary to-primary-dark text-scene-bg border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(0,212,170,0.4)] active:translate-y-0"
-      >
-        {{ fileName ? 'Load Different STL' : 'Load STL File' }}
-      </button>
-      <button
-        v-if="fileName"
-        @click="downloadStl"
-        class="bg-gradient-to-br from-accent to-accent-dark text-white border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(107,141,214,0.4)] active:translate-y-0"
-      >
-        Download STL
-      </button>
-      <span v-if="fileName" class="text-gray-500 text-sm italic">{{ fileName }}</span>
-    </div>
+  <div class="min-h-screen flex flex-col">
+    <header class="p-6 pb-0">
+      <h1 class="text-3xl font-bold text-primary text-center lg:text-left">STL Driller</h1>
+      <p class="text-gray-400 text-sm mt-1 text-center lg:text-left">
+        Load an STL file, select two opposing faces, and drill precision hole patterns
+      </p>
+    </header>
 
-    <!-- Error message -->
-    <div
-      v-if="errorMessage"
-      class="text-danger bg-danger/10 px-4 py-3 rounded-lg border border-danger/30"
-    >
-      {{ errorMessage }}
-    </div>
+    <main class="flex-1 p-6 pt-4">
+      <div class="flex flex-col items-center">
+        <article class="flex flex-col gap-4 w-full max-w-[800px]" aria-label="STL Model Editor">
+          <!-- File Controls Section -->
+          <section aria-label="File controls" class="flex items-center gap-4 flex-wrap">
+            <input
+              ref="fileInputRef"
+              type="file"
+              accept=".stl"
+              @change="handleFileSelect"
+              class="hidden"
+              aria-label="STL file input"
+            />
+            <button
+              @click="triggerFileInput"
+              type="button"
+              class="bg-gradient-to-br from-primary to-primary-dark text-scene-bg border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(0,212,170,0.4)] active:translate-y-0"
+            >
+              {{ fileName ? 'Load Different STL' : 'Load STL File' }}
+            </button>
+            <button
+              v-if="fileName"
+              @click="downloadStl"
+              type="button"
+              class="bg-gradient-to-br from-accent to-accent-dark text-white border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(107,141,214,0.4)] active:translate-y-0"
+            >
+              Download STL
+            </button>
+            <span v-if="fileName" class="text-gray-500 text-sm italic" aria-live="polite">{{
+              fileName
+            }}</span>
+          </section>
 
-    <!-- Face info -->
-    <div
-      v-if="faces.length > 0"
-      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
-    >
-      <div class="flex items-center gap-2">
-        <span class="text-gray-500">Faces:</span>
-        <span class="text-primary font-semibold">{{ faces.length }}</span>
-      </div>
-      <div v-if="selectedFaces.length > 0" class="flex items-center gap-2">
-        <span class="text-gray-500">Selected:</span>
-        <span class="text-danger font-semibold">
-          Face {{ selectedFaces[0]! + 1 }}
-          <template v-if="selectedFaces.length === 2">
-            &amp; Face {{ selectedFaces[1]! + 1 }}
-          </template>
-        </span>
-      </div>
-      <div v-else class="text-gray-500 italic">
-        Click to select a face, ⌘/Ctrl+click to select the second face
-      </div>
-    </div>
+          <!-- Error Message -->
+          <aside
+            v-if="errorMessage"
+            role="alert"
+            class="text-danger bg-danger/10 px-4 py-3 rounded-lg border border-danger/30"
+          >
+            {{ errorMessage }}
+          </aside>
 
-    <!-- Hole parameters (shown when 2 faces selected) -->
-    <div
-      v-if="selectedFaces.length === 2"
-      class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
-    >
-      <div class="flex items-center gap-2">
-        <label for="holeDiameter" class="text-gray-500">Hole diameter:</label>
-        <input
-          id="holeDiameter"
-          v-model.number="holeDiameter"
-          type="number"
-          min="0.5"
-          step="0.5"
-          class="w-20 px-2 py-1 rounded bg-scene-bg border border-gray-600 text-white text-sm focus:outline-none focus:border-primary"
-        />
-        <span class="text-gray-500">mm</span>
-      </div>
-      <div v-if="expectedHoleGrid" class="flex items-center gap-2">
-        <span class="text-gray-500">Grid:</span>
-        <span class="text-accent font-semibold">
-          {{ expectedHoleGrid.numX }} × {{ expectedHoleGrid.numY }}
-          ({{ expectedHoleGrid.positions.length }} holes)
-        </span>
-      </div>
-      <div v-else class="text-warning italic">
-        Holes don't fit in selected area
-      </div>
-      <button
-        @click="drillHoles"
-        :disabled="isDrilling || !canDrill || !expectedHoleGrid"
-        class="bg-gradient-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
-      >
-        {{ isDrilling ? 'Drilling...' : expectedHoleGrid ? `Drill ${expectedHoleGrid.numX}×${expectedHoleGrid.numY} Holes` : 'Drill Holes' }}
-      </button>
-    </div>
+          <!-- Model Info Section -->
+          <section
+            v-if="faces.length > 0"
+            aria-label="Model information"
+            class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
+          >
+            <dl class="flex items-center gap-2 m-0">
+              <dt class="text-gray-500">Faces:</dt>
+              <dd class="text-primary font-semibold m-0">{{ faces.length }}</dd>
+            </dl>
+            <dl v-if="selectedFaces.length > 0" class="flex items-center gap-2 m-0">
+              <dt class="text-gray-500">Selected:</dt>
+              <dd class="text-danger font-semibold m-0">
+                Face {{ selectedFaces[0]! + 1 }}
+                <template v-if="selectedFaces.length === 2">
+                  &amp; Face {{ selectedFaces[1]! + 1 }}
+                </template>
+              </dd>
+            </dl>
+            <p v-else class="text-gray-500 italic m-0">
+              Click to select a face, ⌘/Ctrl+click to select the second face
+            </p>
+          </section>
 
-    <!-- Canvas container -->
-    <div
-      ref="containerRef"
-      @drop="handleDrop"
-      @dragover="handleDragOver"
-      class="w-full h-[500px] rounded-xl overflow-hidden relative bg-scene-bg border-2 border-dashed border-gray-700 transition-colors duration-200 hover:border-primary"
-    >
-      <div
-        v-if="isLoading"
-        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none"
-      >
-        Loading...
+          <!-- Drilling Parameters Section -->
+          <section
+            v-if="selectedFaces.length === 2"
+            aria-label="Drilling parameters"
+            class="flex items-center gap-6 px-4 py-3 bg-white/5 rounded-lg text-sm flex-wrap"
+          >
+            <fieldset class="flex items-center gap-2 border-none p-0 m-0">
+              <label for="holeDiameter" class="text-gray-500">Hole diameter:</label>
+              <input
+                id="holeDiameter"
+                v-model.number="holeDiameter"
+                type="number"
+                min="0.5"
+                step="0.5"
+                aria-describedby="diameterUnit"
+                class="w-20 px-2 py-1 rounded bg-scene-bg border border-gray-600 text-white text-sm focus:outline-none focus:border-primary"
+              />
+              <span id="diameterUnit" class="text-gray-500">mm</span>
+            </fieldset>
+            <dl v-if="expectedHoleGrid" class="flex items-center gap-2 m-0">
+              <dt class="text-gray-500">Grid:</dt>
+              <dd class="text-accent font-semibold m-0">
+                {{ expectedHoleGrid.numX }} × {{ expectedHoleGrid.numY }} ({{
+                  expectedHoleGrid.positions.length
+                }}
+                holes)
+              </dd>
+            </dl>
+            <p v-else class="text-warning italic m-0" role="status">
+              Holes don't fit in selected area
+            </p>
+            <button
+              @click="drillHoles"
+              type="button"
+              :disabled="isDrilling || !canDrill || !expectedHoleGrid"
+              :aria-busy="isDrilling"
+              class="bg-gradient-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
+            >
+              {{
+                isDrilling
+                  ? 'Drilling...'
+                  : expectedHoleGrid
+                    ? `Drill ${expectedHoleGrid.numX}×${expectedHoleGrid.numY} Holes`
+                    : 'Drill Holes'
+              }}
+            </button>
+          </section>
+
+          <!-- 3D Viewer -->
+          <figure class="m-0">
+            <div
+              ref="containerRef"
+              @drop="handleDrop"
+              @dragover="handleDragOver"
+              role="img"
+              aria-label="3D model viewer - drag and drop STL files here"
+              tabindex="0"
+              class="w-full h-[500px] rounded-xl overflow-hidden relative bg-scene-bg border-2 border-dashed border-gray-700 transition-colors duration-200 hover:border-primary focus:border-primary focus:outline-none"
+            >
+              <p
+                v-if="isLoading"
+                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none m-0"
+                aria-live="polite"
+              >
+                Loading...
+              </p>
+              <p
+                v-if="!fileName && !isLoading"
+                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none max-w-[250px] leading-relaxed m-0"
+              >
+                Drop an STL file here or click the button above
+              </p>
+            </div>
+            <figcaption v-if="fileName" class="text-gray-500 text-xs mt-2 text-center">
+              Use mouse to orbit, scroll to zoom, right-click to pan
+            </figcaption>
+          </figure>
+        </article>
       </div>
-      <div
-        v-if="!fileName && !isLoading"
-        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-gray-500 text-lg text-center pointer-events-none max-w-[250px] leading-relaxed"
-      >
-        Drop an STL file here or click the button above
-      </div>
-    </div>
+    </main>
+
+    <footer class="p-4 text-center text-gray-500 text-xs">
+      <p>Drag &amp; drop or click to load • Click faces to select • ⌘/Ctrl+click for second face</p>
+    </footer>
   </div>
 </template>
