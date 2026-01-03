@@ -9,6 +9,7 @@ import ManifoldModule from 'manifold-3d'
 import type { ManifoldToplevel, Manifold, Mesh as ManifoldMesh } from 'manifold-3d'
 // Import the WASM file URL for proper Vite handling
 import manifoldWasmUrl from 'manifold-3d/manifold.wasm?url'
+import { getPolygonBounds, calculateHoleGrid } from './holeGrid'
 
 // Initialize Manifold WASM module
 let manifoldModule: ManifoldToplevel | null = null
@@ -42,73 +43,6 @@ const holeDiameter = ref(5) // Diameter in mm
 
 // Can drill when exactly 2 faces are selected and wall data is computed
 const canDrill = computed(() => selectedFaces.value.length === 2 && currentWallData.value !== null)
-
-// Calculate 2D bounding box of a polygon
-const getPolygonBounds = (
-  polygon: THREE.Vector2[],
-): { minX: number; maxX: number; minY: number; maxY: number } => {
-  let minX = Infinity
-  let maxX = -Infinity
-  let minY = Infinity
-  let maxY = -Infinity
-
-  for (const p of polygon) {
-    minX = Math.min(minX, p.x)
-    maxX = Math.max(maxX, p.x)
-    minY = Math.min(minY, p.y)
-    maxY = Math.max(maxY, p.y)
-  }
-
-  return { minX, maxX, minY, maxY }
-}
-
-// Calculate the hole grid layout based on diameter and available space
-// Returns null if no holes can fit
-const calculateHoleGrid = (
-  bounds: { minX: number; maxX: number; minY: number; maxY: number },
-  diameter: number,
-): { positions: { x: number; y: number }[]; numX: number; numY: number } | null => {
-  const width = bounds.maxX - bounds.minX
-  const height = bounds.maxY - bounds.minY
-  const radius = diameter / 2
-
-  // Minimum gap between holes and from edges (at least 20% of diameter, minimum 0.5mm)
-  const minGap = Math.max(0.5, diameter * 0.2)
-
-  // Calculate how many holes fit in each direction
-  // Formula: N holes need N*D space for holes + (N+1)*gap for spacing
-  // So: N*D + (N+1)*gap <= dimension
-  // N*(D + gap) <= dimension - gap
-  // N <= (dimension - gap) / (D + gap)
-  const numX = Math.max(1, Math.floor((width - minGap) / (diameter + minGap)))
-  const numY = Math.max(1, Math.floor((height - minGap) / (diameter + minGap)))
-
-  // Check if at least one hole fits (need space for diameter + 2 * edge gap)
-  if (width < diameter + 2 * minGap || height < diameter + 2 * minGap) {
-    return null
-  }
-
-  // Calculate actual gaps to distribute evenly
-  // Total space used: numX * diameter + (numX + 1) * gapX = width
-  // gapX = (width - numX * diameter) / (numX + 1)
-  const gapX = (width - numX * diameter) / (numX + 1)
-  const gapY = (height - numY * diameter) / (numY + 1)
-
-  // Generate hole positions
-  // First hole center: bounds.min + gap + radius
-  // Subsequent holes: spaced by (diameter + gap)
-  const positions: { x: number; y: number }[] = []
-
-  for (let row = 0; row < numY; row++) {
-    for (let col = 0; col < numX; col++) {
-      const x = bounds.minX + gapX + radius + col * (diameter + gapX)
-      const y = bounds.minY + gapY + radius + row * (diameter + gapY)
-      positions.push({ x, y })
-    }
-  }
-
-  return { positions, numX, numY }
-}
 
 // Calculate expected hole grid for UI feedback
 const expectedHoleGrid = computed(() => {
@@ -1591,7 +1525,7 @@ onUnmounted(() => {
             <button
               @click="triggerFileInput"
               type="button"
-              class="bg-gradient-to-br from-primary to-primary-dark text-scene-bg border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(0,212,170,0.4)] active:translate-y-0"
+              class="bg-linear-to-br from-primary to-primary-dark text-scene-bg border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(0,212,170,0.4)] active:translate-y-0"
             >
               {{ fileName ? 'Load Different STL' : 'Load STL File' }}
             </button>
@@ -1599,7 +1533,7 @@ onUnmounted(() => {
               v-if="fileName"
               @click="downloadStl"
               type="button"
-              class="bg-gradient-to-br from-accent to-accent-dark text-white border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(107,141,214,0.4)] active:translate-y-0"
+              class="bg-linear-to-br from-accent to-accent-dark text-white border-none px-6 py-3 rounded-lg text-base font-semibold cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_4px_20px_rgba(107,141,214,0.4)] active:translate-y-0"
             >
               Download STL
             </button>
@@ -1677,7 +1611,7 @@ onUnmounted(() => {
               type="button"
               :disabled="isDrilling || !canDrill || !expectedHoleGrid"
               :aria-busy="isDrilling"
-              class="bg-gradient-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
+              class="bg-linear-to-br from-drill to-drill-dark text-white border-none px-4 py-2 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 ml-auto hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(68,136,255,0.4)] active:translate-y-0 disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
             >
               {{
                 isDrilling
